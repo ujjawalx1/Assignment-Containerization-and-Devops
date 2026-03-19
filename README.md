@@ -4,20 +4,28 @@
 
 ---
 
-## Project Structure
+## 🧭 Repository Navigation
 
-```
-pa1/
-├── backend/
-│   ├── Dockerfile          # Multi-stage build (builder + runtime)
-│   ├── main.py             # FastAPI application
-│   ├── requirements.txt    # Python dependencies
-│   └── .dockerignore
-├── database/
-│   ├── Dockerfile          # Custom PostgreSQL image
-│   └── .dockerignore
-├── docker-compose.yml      # Full stack orchestration
-└── README.md
+- 📄 **[README.md](./README.md)** — Project overview and setup instructions (You are here).
+- 📄 **[REPORT.md](./REPORT.md)** — Extensive project report, design analysis, and network reflections.
+- 🐳 **[docker-compose.yml](./docker-compose.yml)** — Container orchestration configuration.
+- 🐍 **[main.py](./main.py)** — Primary FastAPI backend logic and configuration.
+- 📦 **[Dockerfile](./Dockerfile)** — Multi-stage image build definitions.
+- 📋 **[requirements.txt](./requirements.txt)** — Backend Python dependencies.
+- ⚙️ **[_config.yml](./_config.yml)** — Jekyll settings mapping this repo to GitHub Pages.
+
+---
+
+## 📁 Project Structure
+
+```text
+.
+├── Dockerfile              # Application Dockerfile
+├── main.py                 # FastAPI logic
+├── requirements.txt        # Python deps
+├── docker-compose.yml      # Orchestrator orchestration setup
+├── REPORT.md               # Detailed project report
+└── README.md               # Primary project documentation
 ```
 
 ---

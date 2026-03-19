@@ -5,21 +5,40 @@
 **Date:** March 2026  
 **Stack:** FastAPI + PostgreSQL + Docker Compose + IPvlan (L2)
 
+[← Back to README](./README.md)
+
+---
+
+## Table of Contents
+
+- [1. Architecture Overview](#1-architecture-overview)
+- [2. Network Design](#2-network-design)
+- [3. Build Optimization](#3-build-optimization)
+- [4. Docker Compose Design](#4-docker-compose-design)
+- [5. Request Lifecycle](#5-request-lifecycle)
+- [6. Functional Requirements Verification](#6-functional-requirements-verification)
+- [7. Conclusion](#7-conclusion)
+
 ---
 
 ## 1. Architecture Overview
 
 The system follows a two-tier containerized architecture:
 
-```
-Client (Postman / Browser)
-        ↓
-  pa1_backend (192.168.170.10:8000)
-  FastAPI + Uvicorn — Alpine-based container
-        ↓
-  pa1_db (192.168.170.11:5432)
-  PostgreSQL 16 — Alpine-based container
-  Named Volume: pgdata → /var/lib/postgresql/data
+```mermaid
+flowchart TB
+    Client["🖥️ Client\n(Postman / Browser / docker exec)"]
+    
+    subgraph IPvlan_Network["IPvlan L2 Network — ipvlan_net\n(Subnet: 192.168.160.0/20)"]
+        Backend["🐍 pa1_backend\nFastAPI + Uvicorn\n192.168.170.10:8000\npython:3.12-alpine"]
+        DB["🐘 pa1_db\nPostgreSQL 16\n192.168.170.11:5432\npostgres:16-alpine"]
+    end
+    
+    Volume[("📦 pgdata\nNamed Volume\n/var/lib/postgresql/data")]
+    
+    Client -- "HTTP Requests" --> Backend
+    Backend -- "psycopg2\n(TCP 5432)" --> DB
+    DB --- Volume
 ```
 
 Both containers are attached to a manually created IPvlan (L2 mode) network named `ipvlan_net`, with statically assigned IPs from the host's LAN subnet (`192.168.160.0/20`).
@@ -40,23 +59,25 @@ docker network create \
   ipvlan_net
 ```
 
-### Network Diagram
+### Network Topology
 
-```
-LAN Subnet: 192.168.160.0/20
-Gateway:    192.168.160.1
-
-Host Machine (WSL2)
-   eth0 — 192.168.170.242
-      │
-      │ (IPvlan L2 — parent: eth0)
-      ├──────────────────────────────────────┐
-      │                                      │
- [pa1_backend]                          [pa1_db]
- 192.168.170.10:8000                192.168.170.11:5432
- FastAPI + Uvicorn                  PostgreSQL 16
- Alpine Linux                       Alpine Linux
-                                    Volume: pgdata
+```mermaid
+flowchart TB
+    subgraph LAN["LAN Subnet: 192.168.160.0/20"]
+        Gateway["🌐 Gateway\n192.168.160.1"]
+        
+        subgraph Host["Host Machine — WSL2"]
+            ETH0["eth0 — 192.168.170.242"]
+        end
+        
+        subgraph IPVLAN["IPvlan L2 (parent: eth0)"]
+            Backend["🐍 pa1_backend\n192.168.170.10:8000\nFastAPI + Uvicorn\nAlpine Linux"]
+            Database["🐘 pa1_db\n192.168.170.11:5432\nPostgreSQL 16\nAlpine Linux\nVolume: pgdata"]
+        end
+    end
+    
+    Gateway -.->|"Default Route"| ETH0
+    ETH0 -->|"IPvlan L2\nShares Host MAC"| IPVLAN
 ```
 
 ### IPvlan vs Macvlan Comparison
@@ -88,7 +109,31 @@ A well-known limitation of both IPvlan and Macvlan is **host-to-container isolat
 
 ### Multi-Stage Build Strategy
 
-The backend Dockerfile uses a **two-stage build**:
+The application `Dockerfile` (at the project root) uses a **two-stage build**:
+
+```mermaid
+flowchart LR
+    subgraph Stage1["🔨 Stage 1 — Builder\npython:3.12-alpine"]
+        S1A["Install gcc, musl-dev, libpq-dev"]
+        S1B["pip install → /install prefix"]
+        S1A --> S1B
+    end
+    
+    subgraph Stage2["🚀 Stage 2 — Runtime\npython:3.12-alpine"]
+        S2A["Install libpq only (~500KB)"]
+        S2B["COPY --from=builder /install"]
+        S2C["COPY main.py"]
+        S2D["Run as non-root appuser"]
+        S2A --> S2B --> S2C --> S2D
+    end
+    
+    subgraph Discarded["🗑️ Discarded"]
+        D1["gcc, musl-dev, libpq-dev\nbuild headers, pip cache"]
+    end
+    
+    Stage1 -- "Only /install\nis copied" --> Stage2
+    Stage1 -. "Everything else\nis discarded" .-> Discarded
+```
 
 **Stage 1 — Builder (`python:3.12-alpine`):**
 - Installs `gcc`, `musl-dev`, `libpq-dev` (build-time only tools)
@@ -132,15 +177,44 @@ The backend Dockerfile uses a **two-stage build**:
 
 The `docker-compose.yml` defines two services with the following key properties:
 
+```mermaid
+flowchart TB
+    subgraph Compose["docker-compose.yml"]
+        direction TB
+        
+        subgraph DB_Service["Service: database"]
+            DB_Build["Build: Dockerfile"]
+            DB_Container["Container: pa1_db"]
+            DB_Health["Healthcheck:\npg_isready -U appuser -d appdb\nevery 10s, 5 retries"]
+            DB_Restart["Restart: unless-stopped"]
+        end
+        
+        subgraph Backend_Service["Service: backend"]
+            BE_Build["Build: Dockerfile"]
+            BE_Container["Container: pa1_backend"]
+            BE_Health["Healthcheck:\nwget http://127.0.0.1:8000/health\nevery 15s, 3 retries"]
+            BE_Restart["Restart: unless-stopped"]
+        end
+    end
+    
+    Volume[("pgdata\nNamed Volume")]
+    Network{{"ipvlan_net\nexternal: true"}}
+    
+    Backend_Service -- "depends_on:\ncondition: service_healthy" --> DB_Service
+    DB_Service --- Volume
+    DB_Service --- Network
+    Backend_Service --- Network
+```
+
 **Database service (`pa1_db`):**
-- Built from `./database/Dockerfile`
+- Built from root `Dockerfile` (database image)
 - Named volume `pgdata` mounted at `/var/lib/postgresql/data`
 - Static IP `192.168.170.11` on `ipvlan_net`
 - Healthcheck: `pg_isready -U appuser -d appdb` (every 10s, 5 retries)
 - Restart policy: `unless-stopped`
 
 **Backend service (`pa1_backend`):**
-- Built from `./backend/Dockerfile`
+- Built from root `Dockerfile` (application image)
 - Static IP `192.168.170.10` on `ipvlan_net`
 - `depends_on` with `condition: service_healthy` — waits for DB healthcheck to pass before starting
 - Environment variables pass DB credentials (no hardcoding in source)
@@ -159,7 +233,42 @@ The named volume `pgdata` is managed by Docker and persists independently of con
 
 ---
 
-## 5. Functional Requirements Verification
+## 5. Request Lifecycle
+
+The following sequence diagram illustrates the full lifecycle of API requests through the system:
+
+```mermaid
+sequenceDiagram
+    actor Client as Client (docker exec)
+    participant API as pa1_backend<br/>FastAPI @ :8000
+    participant DB as pa1_db<br/>PostgreSQL @ :5432
+    
+    Note over API,DB: Application Startup
+    API->>DB: CREATE TABLE IF NOT EXISTS records (...)
+    DB-->>API: Table ready
+    
+    Note over Client,DB: POST /records
+    Client->>API: POST /records<br/>{"name":"test","value":"hello"}
+    API->>DB: INSERT INTO records (name, value)<br/>VALUES ('test', 'hello') RETURNING id
+    DB-->>API: id = 1
+    API-->>Client: 201 Created<br/>{"id":1,"name":"test","value":"hello"}
+    
+    Note over Client,DB: GET /records
+    Client->>API: GET /records
+    API->>DB: SELECT id, name, value FROM records
+    DB-->>API: [(1, 'test', 'hello')]
+    API-->>Client: 200 OK<br/>[{"id":1,"name":"test","value":"hello"}]
+    
+    Note over Client,DB: GET /health
+    Client->>API: GET /health
+    API->>DB: Connection test (open + close)
+    DB-->>API: Connection OK
+    API-->>Client: 200 OK<br/>{"status":"healthy","db":"connected"}
+```
+
+---
+
+## 6. Functional Requirements Verification
 
 | Requirement | Implementation | Status |
 |---|---|---|
@@ -168,18 +277,17 @@ The named volume `pgdata` is managed by Docker and persists independently of con
 | Healthcheck endpoint | `GET /health` → checks DB connection | ✅ |
 | DB connection via env vars | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | ✅ |
 | Table auto-creation on startup | `@app.on_event("startup")` calls `init_db()` | ✅ |
-| Multi-stage Dockerfile (backend) | Builder + Runtime stages | ✅ |
+| Multi-stage Dockerfile | Builder + Runtime stages in root `Dockerfile` | ✅ |
 | Minimal base image | `python:3.12-alpine`, `postgres:16-alpine` | ✅ |
 | Non-root user | `appuser` in backend container | ✅ |
 | Named volume for persistence | `pgdata` volume | ✅ |
 | Static IPs via IPvlan | `192.168.170.10`, `192.168.170.11` | ✅ |
-| Separate Dockerfiles | `backend/Dockerfile`, `database/Dockerfile` | ✅ |
 | External IPvlan network | `ipvlan_net` created manually, referenced as `external: true` | ✅ |
 | Healthcheck in Compose | Both services have healthcheck defined | ✅ |
 | `depends_on` with condition | Backend waits for DB `service_healthy` | ✅ |
 
 ---
 
-## 6. Conclusion
+## 7. Conclusion
 
 This project demonstrates a production-ready containerized application using FastAPI and PostgreSQL, orchestrated with Docker Compose, and deployed on a custom IPvlan network. Key concepts covered include multi-stage Docker builds for minimal image sizes, named volumes for persistent storage, static IP assignment via IPvlan, and proper service dependency management. The IPvlan L2 mode was selected over Macvlan due to WSL2/Hyper-V MAC address spoofing restrictions, and the host isolation limitation inherent to both modes was documented and addressed through in-container testing.
